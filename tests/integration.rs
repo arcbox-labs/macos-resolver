@@ -54,7 +54,9 @@ fn orphan_cleanup() {
     let pid = std::process::id();
     std::fs::write(
         dir.path().join("alive.local"),
-        format!("# managed by arcbox (pid={pid})\nnameserver 127.0.0.1\nport 5553\nsearch_order 1\n"),
+        format!(
+            "# managed by arcbox (pid={pid})\nnameserver 127.0.0.1\nport 5553\nsearch_order 1\n"
+        ),
     )
     .unwrap();
 

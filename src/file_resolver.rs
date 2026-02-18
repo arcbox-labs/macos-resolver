@@ -361,8 +361,18 @@ mod tests {
     #[test]
     fn list_empty_and_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(FileResolver::with_dir(dir.path()).list().unwrap().is_empty());
-        assert!(FileResolver::with_dir("/nonexistent").list().unwrap().is_empty());
+        assert!(
+            FileResolver::with_dir(dir.path())
+                .list()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            FileResolver::with_dir("/nonexistent")
+                .list()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -370,7 +380,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = FileResolver::with_dir(dir.path());
 
-        resolver.register(&ResolverConfig::arcbox_default(5553)).unwrap();
+        resolver
+            .register(&ResolverConfig::arcbox_default(5553))
+            .unwrap();
         resolver
             .register(
                 &ResolverConfig::new("docker.internal", "127.0.0.1", 5553).with_search_order(2),
@@ -387,8 +399,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = FileResolver::with_dir(dir.path());
 
-        resolver.register(&ResolverConfig::arcbox_default(5553)).unwrap();
-        resolver.register(&ResolverConfig::arcbox_default(6000)).unwrap();
+        resolver
+            .register(&ResolverConfig::arcbox_default(5553))
+            .unwrap();
+        resolver
+            .register(&ResolverConfig::arcbox_default(6000))
+            .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("arcbox.local")).unwrap();
         assert!(content.contains("port 6000"));
