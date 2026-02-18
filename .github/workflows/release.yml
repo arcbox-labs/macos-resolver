@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify version matches tag
+        id: verify
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          CARGO_VER=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "$TAG" != "$CARGO_VER" ]; then
+            echo "Tag v$TAG does not match Cargo.toml version $CARGO_VER"
+            exit 1
+          fi
+          echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: cargo test
+
+      - name: Publish to crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create GitHub release
+        run: gh release create "v${{ steps.verify.outputs.version }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

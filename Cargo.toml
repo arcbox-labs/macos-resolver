@@ -1,0 +1,27 @@
+[package]
+name = "macos-resolver"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Manage macOS /etc/resolver/ files for custom DNS domain resolution"
+readme = "README.md"
+repository = "https://github.com/arcbox-labs/macos-resolver"
+authors = [
+    "ArcBox Labs <team@arcbox.dev> (https://arcbox.dev)",
+    "AprilNEA <dev@aprilnea.me> (https://aprilnea.me)",
+]
+categories = ["os::macos-apis", "network-programming"]
+keywords = ["macos", "dns", "resolver"]
+
+[dependencies]
+thiserror = "2"
+tracing = "0.1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+pedantic = "warn"
+nursery = "warn"
