@@ -59,8 +59,7 @@ impl FileResolver {
     pub fn new(prefix: &str) -> Self {
         let env_key = format!("{}_RESOLVER_DIR", to_env_prefix(prefix));
         let resolver_dir = std::env::var(env_key)
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_RESOLVER_DIR));
+            .map_or_else(|_| PathBuf::from(DEFAULT_RESOLVER_DIR), PathBuf::from);
         Self {
             resolver_dir,
             marker: format!("# managed by {prefix}"),
