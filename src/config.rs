@@ -49,12 +49,6 @@ impl ResolverConfig {
         self.search_order = order;
         self
     }
-
-    /// Convenience: `arcbox.local` pointing to `127.0.0.1:<port>`.
-    #[must_use]
-    pub fn arcbox_default(port: u16) -> Self {
-        Self::new("arcbox.local", "127.0.0.1", port)
-    }
 }
 
 #[cfg(test)]
@@ -74,13 +68,5 @@ mod tests {
     fn with_search_order() {
         let c = ResolverConfig::new("x.local", "127.0.0.1", 53).with_search_order(10);
         assert_eq!(c.search_order, 10);
-    }
-
-    #[test]
-    fn arcbox_default() {
-        let c = ResolverConfig::arcbox_default(5553);
-        assert_eq!(c.domain, "arcbox.local");
-        assert_eq!(c.nameserver, "127.0.0.1");
-        assert_eq!(c.port, 5553);
     }
 }

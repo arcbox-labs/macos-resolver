@@ -12,7 +12,7 @@
 //! ```rust,ignore
 //! use macos_resolver::{FileResolver, ResolverConfig};
 //!
-//! let resolver = FileResolver::new();
+//! let resolver = FileResolver::new("myapp");
 //!
 //! // Register (requires root).
 //! resolver.register(&ResolverConfig::new("myapp.local", "127.0.0.1", 5553))?;
@@ -32,7 +32,7 @@
 //! files left by processes that exited without cleaning up:
 //!
 //! ```rust,ignore
-//! let resolver = FileResolver::new();
+//! let resolver = FileResolver::new("myapp");
 //! let removed = resolver.cleanup_orphaned()?;
 //! ```
 //!
@@ -63,4 +63,4 @@ pub mod util;
 
 pub use config::ResolverConfig;
 pub use error::{ResolverError, Result};
-pub use file_resolver::FileResolver;
+pub use file_resolver::{FileResolver, to_env_prefix};

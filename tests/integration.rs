@@ -15,23 +15,24 @@ use macos_resolver::{FileResolver, ResolverConfig};
 #[test]
 fn full_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
-    let r = FileResolver::with_dir(dir.path());
+    let r = FileResolver::new("testapp").dir(dir.path());
 
     assert!(r.list().unwrap().is_empty());
 
     // Register two domains.
-    r.register(&ResolverConfig::arcbox_default(5553)).unwrap();
+    r.register(&ResolverConfig::new("app.local", "127.0.0.1", 5553))
+        .unwrap();
     r.register(&ResolverConfig::new("docker.internal", "127.0.0.1", 5553))
         .unwrap();
 
-    assert!(r.is_registered("arcbox.local"));
+    assert!(r.is_registered("app.local"));
     let mut domains = r.list().unwrap();
     domains.sort();
-    assert_eq!(domains, vec!["arcbox.local", "docker.internal"]);
+    assert_eq!(domains, vec!["app.local", "docker.internal"]);
 
     // Unregister one at a time.
-    r.unregister("arcbox.local").unwrap();
-    assert!(!r.is_registered("arcbox.local"));
+    r.unregister("app.local").unwrap();
+    assert!(!r.is_registered("app.local"));
     assert!(r.is_registered("docker.internal"));
 
     r.unregister("docker.internal").unwrap();
@@ -41,12 +42,12 @@ fn full_lifecycle() {
 #[test]
 fn orphan_cleanup() {
     let dir = tempfile::tempdir().unwrap();
-    let r = FileResolver::with_dir(dir.path());
+    let r = FileResolver::new("testapp").dir(dir.path());
 
     // Dead process.
     std::fs::write(
         dir.path().join("stale.local"),
-        "# managed by arcbox (pid=999999999)\nnameserver 127.0.0.1\nport 5553\nsearch_order 1\n",
+        "# managed by testapp (pid=999999999)\nnameserver 127.0.0.1\nport 5553\nsearch_order 1\n",
     )
     .unwrap();
 
@@ -55,7 +56,7 @@ fn orphan_cleanup() {
     std::fs::write(
         dir.path().join("alive.local"),
         format!(
-            "# managed by arcbox (pid={pid})\nnameserver 127.0.0.1\nport 5553\nsearch_order 1\n"
+            "# managed by testapp (pid={pid})\nnameserver 127.0.0.1\nport 5553\nsearch_order 1\n"
         ),
     )
     .unwrap();
@@ -73,8 +74,8 @@ fn orphan_cleanup() {
 #[test]
 fn idempotent_register() {
     let dir = tempfile::tempdir().unwrap();
-    let r = FileResolver::with_dir(dir.path());
-    let config = ResolverConfig::arcbox_default(5553);
+    let r = FileResolver::new("testapp").dir(dir.path());
+    let config = ResolverConfig::new("app.local", "127.0.0.1", 5553);
 
     r.register(&config).unwrap();
     r.register(&config).unwrap();
@@ -84,12 +85,13 @@ fn idempotent_register() {
 #[test]
 fn idempotent_unregister() {
     let dir = tempfile::tempdir().unwrap();
-    let r = FileResolver::with_dir(dir.path());
+    let r = FileResolver::new("testapp").dir(dir.path());
 
-    r.register(&ResolverConfig::arcbox_default(5553)).unwrap();
-    r.unregister("arcbox.local").unwrap();
+    r.register(&ResolverConfig::new("app.local", "127.0.0.1", 5553))
+        .unwrap();
+    r.unregister("app.local").unwrap();
     // Second call is a no-op (file already gone).
-    r.unregister("arcbox.local").unwrap();
+    r.unregister("app.local").unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -99,13 +101,13 @@ fn idempotent_unregister() {
 #[test]
 #[ignore = "requires root to write /etc/resolver/"]
 fn real_register_and_unregister() {
-    let r = FileResolver::new();
-    let config = ResolverConfig::new("arcbox-test.local", "127.0.0.1", 15553);
+    let r = FileResolver::new("macos-resolver-test");
+    let config = ResolverConfig::new("resolver-test.local", "127.0.0.1", 15553);
 
     r.register(&config).unwrap();
-    assert!(r.is_registered("arcbox-test.local"));
-    assert!(std::path::Path::new("/etc/resolver/arcbox-test.local").exists());
+    assert!(r.is_registered("resolver-test.local"));
+    assert!(std::path::Path::new("/etc/resolver/resolver-test.local").exists());
 
-    r.unregister("arcbox-test.local").unwrap();
-    assert!(!std::path::Path::new("/etc/resolver/arcbox-test.local").exists());
+    r.unregister("resolver-test.local").unwrap();
+    assert!(!std::path::Path::new("/etc/resolver/resolver-test.local").exists());
 }

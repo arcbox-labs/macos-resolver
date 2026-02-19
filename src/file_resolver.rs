@@ -1,15 +1,13 @@
 //! File-based `/etc/resolver/` management.
 //!
-//! Each file written by this module contains a marker comment with the
-//! creating process's PID, enabling safe ownership checks and orphan cleanup.
+//! Each file written by this module contains a caller-defined marker prefix
+//! (e.g. `# managed by myapp`) with an optional PID, enabling safe ownership
+//! checks and orphan cleanup.
 
 use crate::config::ResolverConfig;
 use crate::error::{ResolverError, Result};
 use crate::util::is_process_alive;
 use std::path::{Path, PathBuf};
-
-/// Marker comment embedded in every managed resolver file.
-const MANAGED_BY_MARKER: &str = "# managed by arcbox";
 
 /// Default macOS resolver directory.
 const DEFAULT_RESOLVER_DIR: &str = "/etc/resolver";
@@ -38,36 +36,65 @@ const DEFAULT_RESOLVER_DIR: &str = "/etc/resolver";
 /// ```rust,ignore
 /// use macos_resolver::{FileResolver, ResolverConfig};
 ///
-/// let resolver = FileResolver::new();
+/// let resolver = FileResolver::new("myapp");
 /// resolver.register(&ResolverConfig::new("myapp.local", "127.0.0.1", 5553))?;
 /// // ...
 /// resolver.unregister("myapp.local")?;
 /// ```
 pub struct FileResolver {
     resolver_dir: PathBuf,
+    /// Marker prefix, e.g. `"myapp"`.
+    marker: String,
 }
 
 impl FileResolver {
     /// Creates a resolver targeting the default `/etc/resolver` directory.
+    ///
+    /// `prefix` is used for two purposes:
+    ///
+    /// 1. **Marker comment** — files are tagged with `# managed by <prefix>`.
+    /// 2. **Environment variable namespace** — `{PREFIX}_RESOLVER_DIR` overrides
+    ///    the default `/etc/resolver` directory (prefix is uppercased, `-` → `_`).
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(prefix: &str) -> Self {
+        let env_key = format!("{}_RESOLVER_DIR", to_env_prefix(prefix));
+        let resolver_dir = std::env::var(env_key)
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(DEFAULT_RESOLVER_DIR));
         Self {
-            resolver_dir: PathBuf::from(DEFAULT_RESOLVER_DIR),
+            resolver_dir,
+            marker: format!("# managed by {prefix}"),
         }
     }
 
-    /// Creates a resolver targeting a custom directory (useful for testing).
+    /// Creates a resolver with an exact marker string (written as-is).
+    ///
+    /// Use this when you need full control over the marker comment.
     #[must_use]
-    pub fn with_dir(resolver_dir: impl Into<PathBuf>) -> Self {
+    pub fn with_marker(marker: impl Into<String>) -> Self {
         Self {
-            resolver_dir: resolver_dir.into(),
+            resolver_dir: PathBuf::from(DEFAULT_RESOLVER_DIR),
+            marker: marker.into(),
         }
+    }
+
+    /// Overrides the resolver directory (useful for testing).
+    #[must_use]
+    pub fn dir(mut self, resolver_dir: impl Into<PathBuf>) -> Self {
+        self.resolver_dir = resolver_dir.into();
+        self
     }
 
     /// Returns the resolver directory path.
     #[must_use]
     pub fn resolver_dir(&self) -> &Path {
         &self.resolver_dir
+    }
+
+    /// Returns the marker string used to identify managed files.
+    #[must_use]
+    pub fn marker(&self) -> &str {
+        &self.marker
     }
 
     /// Writes `/etc/resolver/<domain>` with the given configuration.
@@ -85,13 +112,58 @@ impl FileResolver {
         }
 
         let path = self.resolver_path(&config.domain);
-        std::fs::write(&path, generate_file_content(config))?;
+        let pid = std::process::id();
+        let content = format!(
+            "{marker} (pid={pid})\nnameserver {ns}\nport {port}\nsearch_order {order}\n",
+            marker = self.marker,
+            ns = config.nameserver,
+            port = config.port,
+            order = config.search_order,
+        );
+        std::fs::write(&path, content)?;
 
         tracing::info!(
             domain = %config.domain,
             port = config.port,
             path = %path.display(),
             "Registered macOS DNS resolver"
+        );
+        Ok(())
+    }
+
+    /// Writes `/etc/resolver/<domain>` as a permanent (static) entry.
+    ///
+    /// Unlike [`register`](Self::register), this does **not** embed a PID in
+    /// the marker comment. The file is therefore immune to
+    /// [`cleanup_orphaned`](Self::cleanup_orphaned) (which skips files without
+    /// a PID) and survives daemon restarts.
+    ///
+    /// Intended for one-time installation commands (e.g. `sudo myapp dns install`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolverError::Io`] if the directory cannot be created or
+    /// the file cannot be written.
+    pub fn register_permanent(&self, config: &ResolverConfig) -> Result<()> {
+        if !self.resolver_dir.exists() {
+            std::fs::create_dir_all(&self.resolver_dir)?;
+        }
+
+        let path = self.resolver_path(&config.domain);
+        let content = format!(
+            "{marker}\nnameserver {ns}\nport {port}\nsearch_order {order}\n",
+            marker = self.marker,
+            ns = config.nameserver,
+            port = config.port,
+            order = config.search_order,
+        );
+        std::fs::write(&path, content)?;
+
+        tracing::info!(
+            domain = %config.domain,
+            port = config.port,
+            path = %path.display(),
+            "Registered permanent macOS DNS resolver"
         );
         Ok(())
     }
@@ -116,11 +188,11 @@ impl FileResolver {
             return Ok(());
         }
 
-        if !is_managed(&path) {
+        if !self.is_managed(&path) {
             tracing::warn!(
                 domain = %domain,
                 path = %path.display(),
-                "Resolver file not managed by this crate, refusing to remove"
+                "Resolver file not managed by this instance, refusing to remove"
             );
             return Err(ResolverError::NotManaged {
                 domain: domain.to_string(),
@@ -147,7 +219,7 @@ impl FileResolver {
         let mut domains = Vec::new();
         for entry in std::fs::read_dir(&self.resolver_dir)? {
             let path = entry?.path();
-            if path.is_file() && is_managed(&path) {
+            if path.is_file() && self.is_managed(&path) {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     domains.push(name.to_string());
                 }
@@ -160,13 +232,14 @@ impl FileResolver {
     #[must_use]
     pub fn is_registered(&self, domain: &str) -> bool {
         let path = self.resolver_path(domain);
-        path.exists() && is_managed(&path)
+        path.exists() && self.is_managed(&path)
     }
 
     /// Removes resolver files whose creating PID is no longer running.
     ///
     /// Returns the number of files removed. Non-managed files and files
     /// belonging to still-alive processes are left untouched.
+    /// Permanent files (no PID) are also left untouched.
     ///
     /// # Errors
     ///
@@ -179,11 +252,11 @@ impl FileResolver {
         let mut removed = 0;
         for entry in std::fs::read_dir(&self.resolver_dir)? {
             let path = entry?.path();
-            if !path.is_file() || !is_managed(&path) {
+            if !path.is_file() || !self.is_managed(&path) {
                 continue;
             }
 
-            if let Some(pid) = extract_pid(&path) {
+            if let Some(pid) = self.extract_pid(&path) {
                 if !is_process_alive(pid) {
                     let domain = path
                         .file_name()
@@ -211,63 +284,57 @@ impl FileResolver {
     fn resolver_path(&self, domain: &str) -> PathBuf {
         self.resolver_dir.join(domain)
     }
-}
 
-impl Default for FileResolver {
-    fn default() -> Self {
-        Self::new()
+    /// Checks whether a file contains this instance's marker.
+    fn is_managed(&self, path: &Path) -> bool {
+        std::fs::read_to_string(path).is_ok_and(|c| c.contains(&self.marker))
     }
-}
 
-// ---------------------------------------------------------------------------
-// File content helpers
-// ---------------------------------------------------------------------------
-
-/// Generates resolver file content.
-///
-/// ```text
-/// # managed by arcbox (pid=12345)
-/// nameserver 127.0.0.1
-/// port 5553
-/// search_order 1
-/// ```
-fn generate_file_content(config: &ResolverConfig) -> String {
-    let pid = std::process::id();
-    format!(
-        "{MANAGED_BY_MARKER} (pid={pid})\nnameserver {ns}\nport {port}\nsearch_order {order}\n",
-        ns = config.nameserver,
-        port = config.port,
-        order = config.search_order,
-    )
-}
-
-/// Checks whether a file contains the ownership marker.
-fn is_managed(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|c| c.contains(MANAGED_BY_MARKER))
-}
-
-/// Extracts the PID from `# managed by arcbox (pid=<N>)`.
-fn extract_pid(path: &Path) -> Option<u32> {
-    let content = std::fs::read_to_string(path).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix(MANAGED_BY_MARKER) {
-            let rest = rest.trim().strip_prefix("(pid=")?;
-            return rest.strip_suffix(')')?.parse().ok();
+    /// Extracts the PID from `# managed by <app> (pid=<N>)`.
+    fn extract_pid(&self, path: &Path) -> Option<u32> {
+        let content = std::fs::read_to_string(path).ok()?;
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix(self.marker.as_str()) {
+                let rest = rest.trim().strip_prefix("(pid=")?;
+                return rest.strip_suffix(')')?.parse().ok();
+            }
         }
+        None
     }
-    None
+}
+
+/// Converts a prefix like `"my-app"` to an environment variable prefix `"MY_APP"`.
+///
+/// Uppercases and replaces `-` with `_`.
+#[must_use]
+pub fn to_env_prefix(prefix: &str) -> String {
+    prefix.to_uppercase().replace('-', "_")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn generate_content_includes_marker_and_pid() {
-        let config = ResolverConfig::arcbox_default(5553);
-        let content = generate_file_content(&config);
+    fn test_config() -> ResolverConfig {
+        ResolverConfig::new("test.local", "127.0.0.1", 5553)
+    }
 
-        assert!(content.contains(MANAGED_BY_MARKER));
+    #[test]
+    fn marker_is_derived_from_prefix() {
+        let resolver = FileResolver::new("myapp");
+        assert_eq!(resolver.marker(), "# managed by myapp");
+    }
+
+    #[test]
+    fn register_writes_file_with_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = FileResolver::new("testapp").dir(dir.path());
+        let config = test_config();
+
+        resolver.register(&config).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("test.local")).unwrap();
+
+        assert!(content.contains("testapp"));
         assert!(content.contains("nameserver 127.0.0.1"));
         assert!(content.contains("port 5553"));
         assert!(content.contains("search_order 1"));
@@ -277,28 +344,23 @@ mod tests {
     #[test]
     fn register_and_unregister() {
         let dir = tempfile::tempdir().unwrap();
-        let resolver = FileResolver::with_dir(dir.path());
-        let config = ResolverConfig::arcbox_default(5553);
+        let resolver = FileResolver::new("testapp").dir(dir.path());
+        let config = test_config();
 
         resolver.register(&config).unwrap();
-        assert!(dir.path().join("arcbox.local").exists());
-        assert!(resolver.is_registered("arcbox.local"));
+        assert!(dir.path().join("test.local").exists());
+        assert!(resolver.is_registered("test.local"));
+        assert_eq!(resolver.list().unwrap(), vec!["test.local"]);
 
-        let content = std::fs::read_to_string(dir.path().join("arcbox.local")).unwrap();
-        assert!(content.contains(MANAGED_BY_MARKER));
-        assert!(content.contains("nameserver 127.0.0.1"));
-
-        assert_eq!(resolver.list().unwrap(), vec!["arcbox.local"]);
-
-        resolver.unregister("arcbox.local").unwrap();
-        assert!(!dir.path().join("arcbox.local").exists());
-        assert!(!resolver.is_registered("arcbox.local"));
+        resolver.unregister("test.local").unwrap();
+        assert!(!dir.path().join("test.local").exists());
+        assert!(!resolver.is_registered("test.local"));
     }
 
     #[test]
     fn unregister_nonexistent_is_noop() {
         let dir = tempfile::tempdir().unwrap();
-        let resolver = FileResolver::with_dir(dir.path());
+        let resolver = FileResolver::new("testapp").dir(dir.path());
         resolver.unregister("nonexistent.local").unwrap();
     }
 
@@ -308,32 +370,48 @@ mod tests {
         let path = dir.path().join("other.local");
         std::fs::write(&path, "nameserver 1.1.1.1\nport 53\n").unwrap();
 
-        let resolver = FileResolver::with_dir(dir.path());
+        let resolver = FileResolver::new("testapp").dir(dir.path());
         assert!(resolver.unregister("other.local").is_err());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn unregister_refuses_file_from_different_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.local");
+        std::fs::write(
+            &path,
+            "# managed by otherapp\nnameserver 127.0.0.1\nport 53\n",
+        )
+        .unwrap();
+
+        let resolver = FileResolver::new("myapp").dir(dir.path());
+        assert!(resolver.unregister("shared.local").is_err());
         assert!(path.exists());
     }
 
     #[test]
     fn extract_pid_parses_marker() {
         let dir = tempfile::tempdir().unwrap();
+        let resolver = FileResolver::new("testapp").dir(dir.path());
         let path = dir.path().join("test.local");
         std::fs::write(
             &path,
-            "# managed by arcbox (pid=42)\nnameserver 127.0.0.1\nport 5553\n",
+            "# managed by testapp (pid=42)\nnameserver 127.0.0.1\nport 5553\n",
         )
         .unwrap();
-        assert_eq!(extract_pid(&path), Some(42));
+        assert_eq!(resolver.extract_pid(&path), Some(42));
     }
 
     #[test]
     fn cleanup_removes_dead_pid_files() {
         let dir = tempfile::tempdir().unwrap();
-        let resolver = FileResolver::with_dir(dir.path());
+        let resolver = FileResolver::new("testapp").dir(dir.path());
 
         let path = dir.path().join("orphan.local");
         std::fs::write(
             &path,
-            "# managed by arcbox (pid=999999999)\nnameserver 127.0.0.1\nport 5553\n",
+            "# managed by testapp (pid=999999999)\nnameserver 127.0.0.1\nport 5553\n",
         )
         .unwrap();
 
@@ -344,13 +422,13 @@ mod tests {
     #[test]
     fn cleanup_preserves_alive_pid_files() {
         let dir = tempfile::tempdir().unwrap();
-        let resolver = FileResolver::with_dir(dir.path());
+        let resolver = FileResolver::new("testapp").dir(dir.path());
 
         let pid = std::process::id();
         let path = dir.path().join("alive.local");
         std::fs::write(
             &path,
-            format!("# managed by arcbox (pid={pid})\nnameserver 127.0.0.1\nport 5553\n"),
+            format!("# managed by testapp (pid={pid})\nnameserver 127.0.0.1\nport 5553\n"),
         )
         .unwrap();
 
@@ -362,13 +440,15 @@ mod tests {
     fn list_empty_and_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            FileResolver::with_dir(dir.path())
+            FileResolver::new("testapp")
+                .dir(dir.path())
                 .list()
                 .unwrap()
                 .is_empty()
         );
         assert!(
-            FileResolver::with_dir("/nonexistent")
+            FileResolver::new("testapp")
+                .dir("/nonexistent")
                 .list()
                 .unwrap()
                 .is_empty()
@@ -378,11 +458,9 @@ mod tests {
     #[test]
     fn multiple_domains() {
         let dir = tempfile::tempdir().unwrap();
-        let resolver = FileResolver::with_dir(dir.path());
+        let resolver = FileResolver::new("testapp").dir(dir.path());
 
-        resolver
-            .register(&ResolverConfig::arcbox_default(5553))
-            .unwrap();
+        resolver.register(&test_config()).unwrap();
         resolver
             .register(
                 &ResolverConfig::new("docker.internal", "127.0.0.1", 5553).with_search_order(2),
@@ -391,22 +469,48 @@ mod tests {
 
         let mut domains = resolver.list().unwrap();
         domains.sort();
-        assert_eq!(domains, vec!["arcbox.local", "docker.internal"]);
+        assert_eq!(domains, vec!["docker.internal", "test.local"]);
+    }
+
+    #[test]
+    fn register_permanent_creates_file_without_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = FileResolver::new("testapp").dir(dir.path());
+        let config = test_config();
+
+        resolver.register_permanent(&config).unwrap();
+        assert!(dir.path().join("test.local").exists());
+        assert!(resolver.is_registered("test.local"));
+
+        let content = std::fs::read_to_string(dir.path().join("test.local")).unwrap();
+        assert!(content.contains("testapp"));
+        assert!(content.contains("nameserver 127.0.0.1"));
+        assert!(content.contains("port 5553"));
+        assert!(!content.contains("pid="));
+    }
+
+    #[test]
+    fn cleanup_skips_permanent_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = FileResolver::new("testapp").dir(dir.path());
+        let config = test_config();
+
+        resolver.register_permanent(&config).unwrap();
+        assert_eq!(resolver.cleanup_orphaned().unwrap(), 0);
+        assert!(dir.path().join("test.local").exists());
     }
 
     #[test]
     fn register_overwrites() {
         let dir = tempfile::tempdir().unwrap();
-        let resolver = FileResolver::with_dir(dir.path());
+        let resolver = FileResolver::new("testapp").dir(dir.path());
 
+        resolver.register(&test_config()).unwrap();
         resolver
-            .register(&ResolverConfig::arcbox_default(5553))
-            .unwrap();
-        resolver
-            .register(&ResolverConfig::arcbox_default(6000))
+            .register(&ResolverConfig::new("test.local", "127.0.0.1", 6000))
             .unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join("arcbox.local")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("test.local")).unwrap();
         assert!(content.contains("port 6000"));
         assert!(!content.contains("port 5553"));
     }
